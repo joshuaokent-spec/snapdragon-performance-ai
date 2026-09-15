@@ -6,6 +6,7 @@
   "ai_interval_seconds": 180,
   "database_path": "data/performance_ai.db",
   "background_priority_allowlist": [],
+
   "memory_governor_enabled": true,
   "memory_high_percent": 85.0,
   "memory_critical_percent": 92.0,
@@ -13,10 +14,34 @@
   "memory_priority_allowlist": [],
   "memory_lower_cpu_priority": true,
   "memory_max_managed_processes": 4,
+
+  "pressure_predictor_enabled": true,
+  "pressure_prediction_horizon_seconds": 120,
+  "pressure_prediction_window_seconds": 300,
+  "pressure_prediction_min_samples": 4,
+  "pressure_prediction_warn_percent": 88.0,
+  "pressure_predictive_actions_enabled": true,
+  "pressure_predictive_min_confidence": 0.65,
+
   "working_set_trim_enabled": false,
   "working_set_trim_allowlist": [],
   "working_set_trim_min_mb": 512.0,
   "working_set_trim_cooldown_seconds": 300,
+
+  "startup_guard_enabled": true,
+  "startup_guard_window_seconds": 600,
+  "startup_guard_grace_seconds": 45,
+  "startup_close_allowlist": [],
+
+  "background_guard_enabled": false,
+  "background_close_allowlist": [],
+  "background_close_idle_seconds": 1800,
+  "background_close_min_memory_mb": 100.0,
+
+  "process_close_timeout_seconds": 6,
+  "process_close_children": true,
+  "process_force_kill_enabled": false,
+
   "low_battery_percent": 25,
   "very_low_battery_percent": 15,
   "top_process_count": 8
