@@ -1,0 +1,16 @@
+[project]
+name = "snapdragon-performance-ai"
+version = "0.1.0"
+description = "Local AI performance advisor for Windows Snapdragon Copilot+ PCs"
+requires-python = ">=3.11"
+dependencies = [
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+ai = ["foundry-local-sdk-winml"]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
