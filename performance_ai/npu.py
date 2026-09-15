@@ -11,17 +11,33 @@ CREATE_NO_WINDOW = 0x08000000
 
 
 def _run(args: list[str], timeout: int = 8) -> subprocess.CompletedProcess[str] | None:
+    """Run a read-only diagnostic command without allowing console encoding to crash us.
+
+    Foundry and Windows command-line tools can emit bytes that are not representable
+    in the active Windows ANSI code page. Force a tolerant UTF-8 decode so diagnostic
+    output may contain replacement characters rather than terminating the program.
+    """
     try:
         return subprocess.run(
             args,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
             creationflags=CREATE_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _safe_output(result: subprocess.CompletedProcess[str] | None) -> str | None:
+    if result is None:
+        return None
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    return stdout.strip() or stderr.strip() or f"exit {result.returncode}"
 
 
 @lru_cache(maxsize=1)
@@ -37,7 +53,7 @@ def discover_npu_counters() -> tuple[str, ...]:
         return ()
 
     candidates: list[str] = []
-    for line in result.stdout.splitlines():
+    for line in (result.stdout or "").splitlines():
         clean = line.strip()
         lower = clean.lower()
         if "npu" in lower and (
@@ -62,7 +78,7 @@ def read_npu_percent() -> float | None:
         if not result or result.returncode != 0:
             continue
 
-        rows = list(csv.reader(io.StringIO(result.stdout)))
+        rows = list(csv.reader(io.StringIO(result.stdout or "")))
         if len(rows) < 2:
             continue
 
@@ -95,18 +111,21 @@ def foundry_npu_diagnostics() -> dict[str, object]:
         return diagnostics
 
     status = _run([foundry_path, "server", "status"], timeout=15)
-    if status is not None:
-        diagnostics["foundry_server"] = (
-            status.stdout.strip() or status.stderr.strip() or f"exit {status.returncode}"
-        )
+    diagnostics["foundry_server"] = _safe_output(status)
 
     models = _run(
-        [foundry_path, "model", "list", "--device", "npu", "--variants", "--limit", "10"],
+        [
+            foundry_path,
+            "model",
+            "list",
+            "--device",
+            "npu",
+            "--variants",
+            "--limit",
+            "10",
+        ],
         timeout=60,
     )
-    if models is not None:
-        diagnostics["foundry_npu_models"] = (
-            models.stdout.strip() or models.stderr.strip() or f"exit {models.returncode}"
-        )
+    diagnostics["foundry_npu_models"] = _safe_output(models)
 
     return diagnostics
