@@ -8,7 +8,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ai = ["foundry-local-sdk-winml"]
+ai = ["foundry-local-sdk==2.0.1"]
 dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
