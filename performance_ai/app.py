@@ -146,7 +146,7 @@ class PerformanceAI:
                     source="rules-fallback",
                 )
 
-        rec = self.policy.validate(snap, rec)
+        rec = self.policy.validate(snap, rec, baseline=baseline)
 
         self.storage.log_snapshot(snap)
         self.storage.log_recommendation(snap.timestamp, rec)
