@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
+import platform
+import sys
 import time
 
 from .classifier import FoundryClassifier, RuleClassifier
@@ -59,6 +62,18 @@ def _print_recommendation(rec: Recommendation) -> None:
 
 def run_diagnostics() -> None:
     print("=== Snapdragon Performance AI diagnostics ===")
+
+    process_arch = platform.machine() or "unknown"
+    env_arch = os.environ.get("PROCESSOR_ARCHITECTURE", "unknown")
+    native_arch = os.environ.get("PROCESSOR_ARCHITEW6432") or env_arch
+    print("\nPython runtime:")
+    print(f"  Version:      {platform.python_version()}")
+    print(f"  Executable:   {sys.executable}")
+    print(f"  Process arch: {process_arch}")
+    print(f"  Windows arch: {native_arch}")
+    if "WindowsApps" in sys.executable:
+        print("  Note: Microsoft Store Python detected.")
+
     data = foundry_npu_diagnostics()
 
     counters = data.get("typeperf_npu_counters") or []
