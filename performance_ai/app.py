@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import argparse
+import time
+
+from .classifier import FoundryClassifier, RuleClassifier
+from .config import AppConfig
+from .models import Recommendation, TelemetrySnapshot
+from .optimizer import Optimizer
+from .policy import PolicyEngine
+from .storage import Storage
+from .telemetry import TelemetryCollector
+
+
+def _print_snapshot(snap: TelemetrySnapshot) -> None:
+    npu = "unavailable" if snap.npu_percent is None else f"{snap.npu_percent:.1f}%"
+    battery = (
+        "unavailable"
+        if snap.battery_percent is None
+        else f"{snap.battery_percent:.0f}% "
+        f"({'plugged in' if snap.plugged_in else 'battery'})"
+    )
+
+    print("\n=== System snapshot ===")
+    print(f"CPU:        {snap.cpu_percent:5.1f}%")
+    print(f"Memory:     {snap.memory_percent:5.1f}%")
+    print(f"Disk C:     {snap.disk_percent:5.1f}%")
+    print(f"NPU:        {npu}")
+    print(f"Battery:    {battery}")
+    print(f"Foreground: {snap.foreground_process or 'unknown'}")
+    print(f"Power:      {snap.power_scheme or 'unknown'}")
+
+    if snap.top_processes:
+        print("\nTop processes:")
+        for proc in snap.top_processes[:5]:
+            print(
+                f"  {proc.name:<28} "
+                f"CPU {proc.cpu_percent:6.1f}%  "
+                f"RAM {proc.memory_percent:5.1f}%"
+            )
+
+
+def _print_recommendation(rec: Recommendation) -> None:
+    print("\n=== Recommendation ===")
+    print(f"Workload:   {rec.workload}")
+    print(f"Profile:    {rec.profile}")
+    print(f"Confidence: {rec.confidence:.0%}")
+    print(f"Source:     {rec.source}")
+    print(f"Reason:     {rec.reason}")
+
+
+class PerformanceAI:
+    def __init__(self, config: AppConfig, use_ai: bool = True):
+        self.config = config
+        self.collector = TelemetryCollector(config.top_process_count)
+        self.rules = RuleClassifier()
+        self.policy = PolicyEngine(config)
+        self.optimizer = Optimizer(config)
+        self.storage = Storage(config.database_path)
+        self.use_ai = bool(use_ai and config.foundry_enabled)
+        self.ai = (
+            FoundryClassifier(config.foundry_model)
+            if self.use_ai
+            else None
+        )
+
+    def evaluate(self, use_foundry: bool = True) -> tuple[
+        TelemetrySnapshot, Recommendation
+    ]:
+        snap = self.collector.collect()
+        baseline = self.rules.classify(snap)
+        rec = baseline
+
+        if use_foundry and self.ai is not None:
+            try:
+                rec = self.ai.classify(snap, baseline)
+            except Exception as exc:
+                rec = Recommendation(
+                    workload=baseline.workload,
+                    profile=baseline.profile,
+                    confidence=baseline.confidence,
+                    reason=f"{baseline.reason} AI fallback: {type(exc).__name__}.",
+                    source="rules-fallback",
+                )
+
+        rec = self.policy.validate(snap, rec)
+
+        self.storage.log_snapshot(snap)
+        self.storage.log_recommendation(snap.timestamp, rec)
+
+        results = self.optimizer.apply(rec)
+        self.storage.log_actions(results)
+
+        _print_snapshot(snap)
+        _print_recommendation(rec)
+
+        print("\n=== Actions ===")
+        for result in results:
+            state = "APPLIED" if result.applied else "NO CHANGE"
+            print(f"{state:<10} {result.action}: {result.detail}")
+
+        return snap, rec
+
+    def close(self) -> None:
+        if self.ai is not None:
+            self.ai.close()
+        self.storage.close()
+
+
+def run_once(config: AppConfig, use_ai: bool) -> None:
+    app = PerformanceAI(config, use_ai=use_ai)
+    try:
+        app.evaluate(use_foundry=use_ai)
+    finally:
+        app.close()
+
+
+def run_monitor(config: AppConfig, use_ai: bool) -> None:
+    app = PerformanceAI(config, use_ai=use_ai)
+    last_ai = 0.0
+
+    print(
+        "Monitoring started. "
+        f"Advisor Mode={'ON' if config.advisor_mode else 'OFF'}. "
+        "Press Ctrl+C to stop."
+    )
+
+    try:
+        while True:
+            now = time.monotonic()
+            call_ai = use_ai and (
+                last_ai == 0.0
+                or now - last_ai >= config.ai_interval_seconds
+            )
+            app.evaluate(use_foundry=call_ai)
+            if call_ai:
+                last_ai = now
+            time.sleep(max(1, config.telemetry_interval_seconds))
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        app.close()
+
+
+def cli() -> None:
+    parser = argparse.ArgumentParser(
+        description="NPU-aware local performance advisor for Windows Copilot+ PCs."
+    )
+    parser.add_argument(
+        "command",
+        choices=["once", "monitor"],
+        nargs="?",
+        default="once",
+    )
+    parser.add_argument(
+        "--config",
+        default="config.json",
+        help="Path to configuration JSON.",
+    )
+    parser.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="Disable Foundry Local and use deterministic rules only.",
+    )
+    args = parser.parse_args()
+
+    config = AppConfig.load(args.config)
+    use_ai = not args.no_ai
+
+    if args.command == "once":
+        run_once(config, use_ai)
+    else:
+        run_monitor(config, use_ai)
