@@ -9,16 +9,10 @@ from functools import lru_cache
 
 
 CREATE_NO_WINDOW = 0x08000000
-_NPU_TOKEN_RE = re.compile(r"(?<![A-Za-z])NPU(?:\b|(?=\d))", re.IGNORECASE)
 
 
 def _run(args: list[str], timeout: int = 8) -> subprocess.CompletedProcess[str] | None:
-    """Run a read-only diagnostic command without allowing console encoding to crash us.
-
-    Foundry and Windows command-line tools can emit bytes that are not representable
-    in the active Windows ANSI code page. Force a tolerant UTF-8 decode so diagnostic
-    output may contain replacement characters rather than terminating the program.
-    """
+    """Run a read-only diagnostic command without console encoding crashes."""
     try:
         return subprocess.run(
             args,
@@ -43,18 +37,16 @@ def _safe_output(result: subprocess.CompletedProcess[str] | None) -> str | None:
 
 
 def _looks_like_npu_counter(counter: str) -> bool:
-    """Return True only when NPU appears as a hardware token, not inside a word.
+    lower = counter.lower()
 
-    For example, ``TextInputHost`` contains the letters ``npu`` across ``input``;
-    that must not be mistaken for a Neural Processing Unit counter.
-    """
-    if not _NPU_TOKEN_RE.search(counter):
+    # Require NPU as a token rather than a substring. This avoids false matches
+    # such as TextInputHost where the letters "npu" occur inside "input".
+    if not re.search(r"(?<![a-z0-9])npu(?![a-z0-9])", lower):
         return False
 
-    lower = counter.lower()
     return any(
-        marker in lower
-        for marker in ("utilization", "% processor", "usage", "engine")
+        keyword in lower
+        for keyword in ("utilization", "% processor", "usage", "engine")
     )
 
 
@@ -115,12 +107,16 @@ def foundry_npu_diagnostics() -> dict[str, object]:
     diagnostics: dict[str, object] = {
         "typeperf_npu_counters": list(discover_npu_counters()),
         "foundry_cli": foundry_path,
+        "foundry_version": None,
         "foundry_server": None,
         "foundry_npu_models": None,
     }
 
     if not foundry_path:
         return diagnostics
+
+    version = _run([foundry_path, "--version"], timeout=15)
+    diagnostics["foundry_version"] = _safe_output(version)
 
     status = _run([foundry_path, "server", "status"], timeout=15)
     diagnostics["foundry_server"] = _safe_output(status)
