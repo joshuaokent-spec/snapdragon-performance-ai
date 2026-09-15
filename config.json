@@ -1,0 +1,12 @@
+{
+  "advisor_mode": true,
+  "foundry_enabled": true,
+  "foundry_model": "qwen2.5-0.5b",
+  "telemetry_interval_seconds": 5,
+  "ai_interval_seconds": 180,
+  "database_path": "data/performance_ai.db",
+  "background_priority_allowlist": [],
+  "low_battery_percent": 25,
+  "very_low_battery_percent": 15,
+  "top_process_count": 8
+}
