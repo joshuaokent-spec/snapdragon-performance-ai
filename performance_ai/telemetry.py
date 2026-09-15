@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import re
 import subprocess
 
@@ -55,15 +56,19 @@ def _top_processes(limit: int) -> list[ProcessSample]:
     psutil intentionally allows Process.cpu_percent() to exceed 100% when a
     process uses multiple logical CPUs. For a human-facing Windows dashboard,
     normalize by logical CPU count so values more closely match Task Manager.
+
+    The current optimizer process is excluded so the system does not classify
+    its own telemetry collector / AI client as the user's workload.
     """
     logical_cpus = max(1, psutil.cpu_count(logical=True) or 1)
     ignored_names = {"system idle process", "idle"}
+    current_pid = os.getpid()
 
     processes: list[psutil.Process] = []
     for proc in psutil.process_iter(["pid", "name"]):
         try:
             name = (proc.info.get("name") or "").strip().lower()
-            if proc.pid == 0 or name in ignored_names:
+            if proc.pid in {0, current_pid} or name in ignored_names:
                 continue
             proc.cpu_percent(None)
             processes.append(proc)
