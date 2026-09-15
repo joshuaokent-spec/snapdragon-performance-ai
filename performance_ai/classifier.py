@@ -88,7 +88,7 @@ class RuleClassifier:
 
 
 def _extract_json(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
+    cleaned = (text or "").strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
     cleaned = re.sub(r"\s*```$", "", cleaned)
     try:
@@ -100,8 +100,13 @@ def _extract_json(text: str) -> dict[str, Any]:
 
     match = re.search(r"\{.*\}", cleaned, flags=re.S)
     if not match:
-        raise ValueError("Model did not return a JSON object.")
-    value = json.loads(match.group(0))
+        preview = cleaned[:240] if cleaned else "<empty response>"
+        raise ValueError(f"Model did not return a JSON object. Output: {preview!r}")
+    try:
+        value = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        preview = match.group(0)[:240]
+        raise ValueError(f"Model returned invalid JSON. Output: {preview!r}") from exc
     if not isinstance(value, dict):
         raise ValueError("Model JSON was not an object.")
     return value
@@ -127,8 +132,8 @@ class FoundryClassifier:
         )
         self.manager = FoundryLocalManager.instance
 
-        self.manager.download_and_register_eps()
-
+        # Foundry Local 2.x automatically selects and loads the appropriate
+        # hardware execution provider (WinML/QNN on compatible Snapdragon PCs).
         self.model = self.manager.catalog.get_model(self.model_alias)
         self.model.download()
         self.model.load()
@@ -172,7 +177,7 @@ Important rules:
 - DATA_SCIENCE is appropriate for sustained Python/data/ETL workloads.
 - DEVELOPMENT is appropriate for coding/building with developer tools.
 - PERFORMANCE should be reserved for heavy sustained compute, especially while plugged in.
-- Return JSON only.
+- Return exactly one compact JSON object and no markdown or commentary.
 
 Schema:
 {
