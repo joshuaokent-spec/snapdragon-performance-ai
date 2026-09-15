@@ -6,6 +6,7 @@ import platform
 import sys
 import sysconfig
 import time
+from importlib import metadata
 
 from .classifier import FoundryClassifier, RuleClassifier
 from .config import AppConfig
@@ -15,6 +16,13 @@ from .optimizer import Optimizer
 from .policy import PolicyEngine
 from .storage import Storage
 from .telemetry import TelemetryCollector
+
+
+def _package_version(name: str) -> str:
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return "not installed"
 
 
 def _print_snapshot(snap: TelemetrySnapshot) -> None:
@@ -74,8 +82,11 @@ def run_diagnostics() -> None:
     print(f"  Platform tag:   {sysconfig.get_platform()}")
     print(f"  Env arch:       {processor_arch}")
     print(f"  Env WOW64 arch: {processor_arch_w6432}")
-    if "WindowsApps" in sys.executable:
-        print("  Note: Microsoft Store Python detected.")
+
+    print("\nPython packages:")
+    print(f"  foundry-local-sdk:       {_package_version('foundry-local-sdk')}")
+    print(f"  foundry-local-sdk-winml: {_package_version('foundry-local-sdk-winml')}")
+    print(f"  onnxruntime-core:        {_package_version('onnxruntime-core')}")
 
     data = foundry_npu_diagnostics()
 
@@ -87,6 +98,7 @@ def run_diagnostics() -> None:
         print("  None found. This is not proof that the NPU is unavailable.")
 
     print(f"\nFoundry CLI: {data.get('foundry_cli') or 'not found on PATH'}")
+    print(f"Foundry CLI version: {data.get('foundry_version') or 'unavailable'}")
 
     print("\nFoundry server status:")
     print(data.get("foundry_server") or "  unavailable")
@@ -121,11 +133,16 @@ class PerformanceAI:
             try:
                 rec = self.ai.classify(snap, baseline)
             except Exception as exc:
+                detail = str(exc).strip().replace("\n", " ")[:240]
+                suffix = f": {detail}" if detail else ""
                 rec = Recommendation(
                     workload=baseline.workload,
                     profile=baseline.profile,
                     confidence=baseline.confidence,
-                    reason=f"{baseline.reason} AI fallback: {type(exc).__name__}.",
+                    reason=(
+                        f"{baseline.reason} AI fallback: "
+                        f"{type(exc).__name__}{suffix}."
+                    ),
                     source="rules-fallback",
                 )
 
