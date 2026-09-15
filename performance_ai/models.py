@@ -57,8 +57,22 @@ class TelemetrySnapshot:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        result = asdict(self)
-        return result
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class PressurePrediction:
+    timestamp: str
+    horizon_seconds: int
+    current_memory_percent: float
+    predicted_memory_percent: float
+    memory_slope_percent_per_minute: float
+    risk: str
+    confidence: float
+    source: str = "statistical"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(slots=True)
