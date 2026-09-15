@@ -8,12 +8,15 @@ import sysconfig
 import time
 from importlib import metadata
 
+from .autostart import autostart_status, install_autostart, remove_autostart
 from .classifier import FoundryClassifier, RuleClassifier
 from .config import AppConfig
-from .models import Recommendation, TelemetrySnapshot
+from .models import PressurePrediction, Recommendation, TelemetrySnapshot
 from .npu import foundry_npu_diagnostics
 from .optimizer import Optimizer
 from .policy import PolicyEngine
+from .predictor import ResourcePressurePredictor
+from .settings_ui import run_settings
 from .storage import Storage
 from .telemetry import TelemetryCollector
 
@@ -26,16 +29,11 @@ def _package_version(name: str) -> str:
 
 
 def _print_snapshot(snap: TelemetrySnapshot) -> None:
-    npu = (
-        "counter unavailable"
-        if snap.npu_percent is None
-        else f"{snap.npu_percent:.1f}%"
-    )
+    npu = "counter unavailable" if snap.npu_percent is None else f"{snap.npu_percent:.1f}%"
     battery = (
         "unavailable"
         if snap.battery_percent is None
-        else f"{snap.battery_percent:.0f}% "
-        f"({'plugged in' if snap.plugged_in else 'battery'})"
+        else f"{snap.battery_percent:.0f}% ({'plugged in' if snap.plugged_in else 'battery'})"
     )
 
     print("\n=== System snapshot ===")
@@ -54,10 +52,21 @@ def _print_snapshot(snap: TelemetrySnapshot) -> None:
         print("\nTop processes:")
         for proc in snap.top_processes[:5]:
             print(
-                f"  {proc.name:<26} "
-                f"CPU {proc.cpu_percent:5.1f}%  "
+                f"  {proc.name:<26} CPU {proc.cpu_percent:5.1f}%  "
                 f"RAM {proc.rss_mb:7.0f} MB ({proc.memory_percent:4.1f}%)"
             )
+
+
+def _print_prediction(prediction: PressurePrediction | None) -> None:
+    if prediction is None:
+        return
+    print("\n=== Pressure forecast ===")
+    print(f"Horizon:    {prediction.horizon_seconds}s")
+    print(f"RAM now:    {prediction.current_memory_percent:.1f}%")
+    print(f"RAM forecast:{prediction.predicted_memory_percent:5.1f}%")
+    print(f"Trend:      {prediction.memory_slope_percent_per_minute:+.2f}%/min")
+    print(f"Risk:       {prediction.risk}")
+    print(f"Confidence: {prediction.confidence:.0%}")
 
 
 def _print_recommendation(rec: Recommendation) -> None:
@@ -88,8 +97,11 @@ def run_diagnostics() -> None:
     print(f"  foundry-local-sdk-winml: {_package_version('foundry-local-sdk-winml')}")
     print(f"  onnxruntime-core:        {_package_version('onnxruntime-core')}")
 
-    data = foundry_npu_diagnostics()
+    enabled, launcher = autostart_status()
+    print("\nOptimizer login startup:")
+    print(f"  {'installed' if enabled else 'not installed'}: {launcher}")
 
+    data = foundry_npu_diagnostics()
     counters = data.get("typeperf_npu_counters") or []
     print(f"\nWindows NPU performance counters: {len(counters)} found")
     for counter in counters[:8]:
@@ -99,10 +111,8 @@ def run_diagnostics() -> None:
 
     print(f"\nFoundry CLI: {data.get('foundry_cli') or 'not found on PATH'}")
     print(f"Foundry CLI version: {data.get('foundry_version') or 'unavailable'}")
-
     print("\nFoundry server status:")
     print(data.get("foundry_server") or "  unavailable")
-
     print("\nFoundry NPU model variants:")
     print(data.get("foundry_npu_models") or "  none reported")
 
@@ -111,27 +121,23 @@ class PerformanceAI:
     def __init__(self, config: AppConfig, use_ai: bool = True):
         self.config = config
         self.collector = TelemetryCollector(config.top_process_count)
+        self.predictor = ResourcePressurePredictor(config)
         self.rules = RuleClassifier()
         self.policy = PolicyEngine(config)
         self.optimizer = Optimizer(config)
         self.storage = Storage(config.database_path)
         self.use_ai = bool(use_ai and config.foundry_enabled)
-        self.ai = (
-            FoundryClassifier(config.foundry_model)
-            if self.use_ai
-            else None
-        )
+        self.ai = FoundryClassifier(config.foundry_model) if self.use_ai else None
 
-    def evaluate(self, use_foundry: bool = True) -> tuple[
-        TelemetrySnapshot, Recommendation
-    ]:
+    def evaluate(self, use_foundry: bool = True) -> tuple[TelemetrySnapshot, Recommendation]:
         snap = self.collector.collect()
+        prediction = self.predictor.update(snap)
         baseline = self.rules.classify(snap)
         rec = baseline
 
         if use_foundry and self.ai is not None:
             try:
-                rec = self.ai.classify(snap, baseline)
+                rec = self.ai.classify(snap, baseline, prediction=prediction)
             except Exception as exc:
                 detail = str(exc).strip().replace("\n", " ")[:240]
                 suffix = f": {detail}" if detail else ""
@@ -139,25 +145,26 @@ class PerformanceAI:
                     workload=baseline.workload,
                     profile=baseline.profile,
                     confidence=baseline.confidence,
-                    reason=(
-                        f"{baseline.reason} AI fallback: "
-                        f"{type(exc).__name__}{suffix}."
-                    ),
+                    reason=f"{baseline.reason} AI fallback: {type(exc).__name__}{suffix}.",
                     source="rules-fallback",
                 )
 
         rec = self.policy.validate(snap, rec, baseline=baseline)
 
         self.storage.log_snapshot(snap)
+        self.storage.log_prediction(prediction)
         self.storage.log_recommendation(snap.timestamp, rec)
 
-        results = self.optimizer.apply(rec, snap)
+        results = self.optimizer.apply(rec, snap, prediction=prediction)
         self.storage.log_actions(results)
 
         _print_snapshot(snap)
+        _print_prediction(prediction)
         _print_recommendation(rec)
 
         print("\n=== Actions ===")
+        if not results:
+            print("NO CHANGE  No optimization action was needed.")
         for result in results:
             state = "APPLIED" if result.applied else "NO CHANGE"
             print(f"{state:<10} {result.action}: {result.detail}")
@@ -192,8 +199,7 @@ def run_monitor(config: AppConfig, use_ai: bool) -> None:
         while True:
             now = time.monotonic()
             call_ai = use_ai and (
-                last_ai == 0.0
-                or now - last_ai >= config.ai_interval_seconds
+                last_ai == 0.0 or now - last_ai >= config.ai_interval_seconds
             )
             app.evaluate(use_foundry=call_ai)
             if call_ai:
@@ -211,15 +217,18 @@ def cli() -> None:
     )
     parser.add_argument(
         "command",
-        choices=["once", "monitor", "diagnose"],
+        choices=[
+            "once",
+            "monitor",
+            "diagnose",
+            "settings",
+            "install-startup",
+            "remove-startup",
+        ],
         nargs="?",
         default="once",
     )
-    parser.add_argument(
-        "--config",
-        default="config.json",
-        help="Path to configuration JSON.",
-    )
+    parser.add_argument("--config", default="config.json", help="Path to configuration JSON.")
     parser.add_argument(
         "--no-ai",
         action="store_true",
@@ -229,6 +238,17 @@ def cli() -> None:
 
     if args.command == "diagnose":
         run_diagnostics()
+        return
+    if args.command == "settings":
+        run_settings(args.config)
+        return
+    if args.command == "install-startup":
+        path = install_autostart()
+        print(f"Installed login startup launcher: {path}")
+        return
+    if args.command == "remove-startup":
+        removed = remove_autostart()
+        print("Removed login startup launcher." if removed else "No login startup launcher was installed.")
         return
 
     config = AppConfig.load(args.config)
