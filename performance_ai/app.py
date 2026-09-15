@@ -54,9 +54,9 @@ def _print_snapshot(snap: TelemetrySnapshot) -> None:
         print("\nTop processes:")
         for proc in snap.top_processes[:5]:
             print(
-                f"  {proc.name:<28} "
-                f"CPU {proc.cpu_percent:6.1f}%  "
-                f"RAM {proc.memory_percent:5.1f}%"
+                f"  {proc.name:<26} "
+                f"CPU {proc.cpu_percent:5.1f}%  "
+                f"RAM {proc.rss_mb:7.0f} MB ({proc.memory_percent:4.1f}%)"
             )
 
 
@@ -151,7 +151,7 @@ class PerformanceAI:
         self.storage.log_snapshot(snap)
         self.storage.log_recommendation(snap.timestamp, rec)
 
-        results = self.optimizer.apply(rec)
+        results = self.optimizer.apply(rec, snap)
         self.storage.log_actions(results)
 
         _print_snapshot(snap)
