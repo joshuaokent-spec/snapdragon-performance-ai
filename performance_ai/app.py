@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import time
 
 from .classifier import FoundryClassifier, RuleClassifier
@@ -30,7 +29,7 @@ def _print_snapshot(snap: TelemetrySnapshot) -> None:
     print("\n=== System snapshot ===")
     print(f"CPU:        {snap.cpu_percent:5.1f}%")
     print(f"Memory:     {snap.memory_percent:5.1f}%")
-    print(f"Disk C:     {snap.disk_percent:5.1f}%")
+    print(f"Disk used:  {snap.disk_percent:5.1f}%")
     print(f"NPU:        {npu}")
     print(f"Battery:    {battery}")
     print(f"Foreground: {snap.foreground_process or 'unknown'}")
