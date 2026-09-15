@@ -51,14 +51,12 @@ def _active_power_scheme() -> str | None:
 
 
 def _top_processes(limit: int) -> list[ProcessSample]:
-    """Return Task-Manager-like per-process CPU usage.
+    """Return Task-Manager-like process CPU plus resident-memory usage.
 
     psutil intentionally allows Process.cpu_percent() to exceed 100% when a
-    process uses multiple logical CPUs. For a human-facing Windows dashboard,
-    normalize by logical CPU count so values more closely match Task Manager.
-
-    The current optimizer process is excluded so the system does not classify
-    its own telemetry collector / AI client as the user's workload.
+    process uses multiple logical CPUs. Normalize by logical CPU count for a
+    human-facing dashboard. The optimizer itself is excluded from workload
+    telemetry so it does not classify its own Python process as user activity.
     """
     logical_cpus = max(1, psutil.cpu_count(logical=True) or 1)
     ignored_names = {"system idle process", "idle"}
@@ -75,7 +73,6 @@ def _top_processes(limit: int) -> list[ProcessSample]:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
-    # Give the primed counters a short measurement window.
     psutil.cpu_percent(interval=0.25)
 
     samples: list[ProcessSample] = []
@@ -84,6 +81,7 @@ def _top_processes(limit: int) -> list[ProcessSample]:
             raw_cpu = float(proc.cpu_percent(None))
             cpu = min(100.0, raw_cpu / logical_cpus)
             mem = float(proc.memory_percent())
+            rss_mb = float(proc.memory_info().rss) / (1024 * 1024)
             if cpu <= 0 and mem <= 0:
                 continue
             samples.append(
@@ -92,12 +90,15 @@ def _top_processes(limit: int) -> list[ProcessSample]:
                     name=proc.name(),
                     cpu_percent=round(cpu, 1),
                     memory_percent=round(mem, 2),
+                    rss_mb=round(rss_mb, 1),
                 )
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
-    samples.sort(key=lambda p: (p.cpu_percent, p.memory_percent), reverse=True)
+    # Keep compute-heavy processes visible while still surfacing large working
+    # sets. The second key makes high-RAM apps bubble up when CPU use is similar.
+    samples.sort(key=lambda p: (p.cpu_percent, p.rss_mb), reverse=True)
     return samples[:limit]
 
 
