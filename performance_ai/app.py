@@ -4,6 +4,7 @@ import argparse
 import os
 import platform
 import sys
+import sysconfig
 import time
 
 from .classifier import FoundryClassifier, RuleClassifier
@@ -64,13 +65,15 @@ def run_diagnostics() -> None:
     print("=== Snapdragon Performance AI diagnostics ===")
 
     process_arch = platform.machine() or "unknown"
-    env_arch = os.environ.get("PROCESSOR_ARCHITECTURE", "unknown")
-    native_arch = os.environ.get("PROCESSOR_ARCHITEW6432") or env_arch
+    processor_arch = os.environ.get("PROCESSOR_ARCHITECTURE", "unset")
+    processor_arch_w6432 = os.environ.get("PROCESSOR_ARCHITEW6432", "unset")
     print("\nPython runtime:")
-    print(f"  Version:      {platform.python_version()}")
-    print(f"  Executable:   {sys.executable}")
-    print(f"  Process arch: {process_arch}")
-    print(f"  Windows arch: {native_arch}")
+    print(f"  Version:        {platform.python_version()}")
+    print(f"  Executable:     {sys.executable}")
+    print(f"  Process arch:   {process_arch}")
+    print(f"  Platform tag:   {sysconfig.get_platform()}")
+    print(f"  Env arch:       {processor_arch}")
+    print(f"  Env WOW64 arch: {processor_arch_w6432}")
     if "WindowsApps" in sys.executable:
         print("  Note: Microsoft Store Python detected.")
 
