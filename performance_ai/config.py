@@ -58,6 +58,7 @@ class AppConfig:
     background_close_min_memory_mb: float = 100.0
 
     process_close_timeout_seconds: int = 6
+    process_close_children: bool = True
     process_force_kill_enabled: bool = False
 
     low_battery_percent: int = 25
