@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 import subprocess
+from dataclasses import replace
 
 import psutil
 
 from .config import AppConfig
 from .memory_governor import MemoryGovernor
-from .models import ActionResult, Recommendation, TelemetrySnapshot
+from .models import ActionResult, PressurePrediction, Recommendation, TelemetrySnapshot
+from .process_guard import ProcessGuard
 from .profiles import PROFILE_POWER_SCHEME_PREFERENCE
 
 
@@ -29,7 +31,6 @@ def _run_powercfg(args: list[str]) -> subprocess.CompletedProcess[str] | None:
 
 
 def installed_power_schemes() -> dict[str, str]:
-    """Return {scheme_name_lower: guid} for schemes already installed."""
     result = _run_powercfg(["/list"])
     if not result or result.returncode != 0:
         return {}
@@ -45,6 +46,7 @@ class Optimizer:
     def __init__(self, config: AppConfig):
         self.config = config
         self.memory_governor = MemoryGovernor(config)
+        self.process_guard = ProcessGuard(config)
 
     def _choose_scheme(self, profile: str) -> tuple[str, str] | None:
         schemes = installed_power_schemes()
@@ -76,7 +78,7 @@ class Optimizer:
             )
 
         detail = "powercfg failed."
-        if result and result.stderr.strip():
+        if result and (result.stderr or "").strip():
             detail = result.stderr.strip()
         return ActionResult(
             action="set_power_scheme",
@@ -129,14 +131,49 @@ class Optimizer:
                 )
         return results
 
+    def _memory_snapshot_for_prediction(
+        self,
+        snap: TelemetrySnapshot,
+        prediction: PressurePrediction | None,
+    ) -> tuple[TelemetrySnapshot, list[ActionResult]]:
+        if (
+            prediction is None
+            or not self.config.pressure_predictive_actions_enabled
+            or prediction.confidence < self.config.pressure_predictive_min_confidence
+            or prediction.predicted_memory_percent < self.config.pressure_prediction_warn_percent
+            or snap.memory_percent >= self.config.memory_high_percent
+        ):
+            return snap, []
+
+        forecast_percent = min(
+            float(prediction.predicted_memory_percent),
+            float(self.config.memory_critical_percent) - 0.1,
+        )
+        if forecast_percent < self.config.memory_high_percent:
+            forecast_percent = self.config.memory_high_percent
+
+        synthetic = replace(snap, memory_percent=forecast_percent)
+        note = ActionResult(
+            action="predictive_memory_pressure",
+            requested=prediction.risk,
+            applied=False,
+            detail=(
+                f"Current RAM is {snap.memory_percent:.1f}%; predictor forecasts "
+                f"{prediction.predicted_memory_percent:.1f}% in {prediction.horizon_seconds}s "
+                f"at {prediction.confidence:.0%} confidence. Memory governor evaluated preemptively."
+            ),
+        )
+        return synthetic, [note]
+
     def apply(
         self,
         rec: Recommendation,
         snap: TelemetrySnapshot,
+        prediction: PressurePrediction | None = None,
     ) -> list[ActionResult]:
-        # The memory governor is evaluated on every telemetry cycle so it can
-        # react independently of the slower AI interval.
-        memory_results = self.memory_governor.evaluate(snap)
+        governor_snap, predictive_notes = self._memory_snapshot_for_prediction(snap, prediction)
+        memory_results = self.memory_governor.evaluate(governor_snap)
+        process_results = self.process_guard.evaluate(snap)
 
         if self.config.advisor_mode:
             return [
@@ -146,7 +183,9 @@ class Optimizer:
                     applied=False,
                     detail="Advisor Mode is enabled; no system setting was changed.",
                 ),
+                *predictive_notes,
                 *memory_results,
+                *process_results,
             ]
 
         results = [self._apply_power_scheme(rec.profile)]
@@ -154,5 +193,7 @@ class Optimizer:
         if rec.profile in {"LOCAL_AI", "DATA_SCIENCE", "PERFORMANCE"}:
             results.extend(self._lower_allowlisted_background_processes())
 
+        results.extend(predictive_notes)
         results.extend(memory_results)
+        results.extend(process_results)
         return results
