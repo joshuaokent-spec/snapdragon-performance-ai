@@ -39,9 +39,9 @@ def _safe_output(result: subprocess.CompletedProcess[str] | None) -> str | None:
 def _looks_like_npu_counter(counter: str) -> bool:
     lower = counter.lower()
 
-    # Require NPU as a token rather than a substring. This avoids false matches
-    # such as TextInputHost where the letters "npu" occur inside "input".
-    if not re.search(r"(?<![a-z0-9])npu(?![a-z0-9])", lower):
+    # Require NPU as a real token (optionally followed by digits, e.g. NPU0)
+    # rather than the letters appearing inside another word such as "input".
+    if not re.search(r"(?<![a-z])npu\d*(?![a-z])", lower):
         return False
 
     return any(
