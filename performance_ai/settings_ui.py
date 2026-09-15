@@ -5,13 +5,46 @@ import psutil
 from .config import AppConfig
 
 
+class SettingsExit(Exception):
+    """Internal control-flow exception for leaving the settings UI."""
+
+
+class SettingsBack(Exception):
+    """Internal control-flow exception for returning to the main settings menu."""
+
+
 def _yes_no(value: bool) -> str:
     return "ON" if value else "OFF"
 
 
+def _prompt(prompt: str, *, allow_back: bool = False) -> str:
+    """Read one settings value with consistent escape commands.
+
+    At any prompt:
+      :q / :quit / :exit -> leave settings without saving
+      :back             -> return to the main settings menu (when allowed)
+      Ctrl+C / EOF      -> leave settings without saving
+    """
+    try:
+        raw = input(prompt)
+    except (KeyboardInterrupt, EOFError) as exc:
+        raise SettingsExit from exc
+
+    cleaned = raw.strip()
+    lowered = cleaned.lower()
+    if lowered in {":q", ":quit", ":exit"}:
+        raise SettingsExit
+    if allow_back and lowered in {":back", ":b"}:
+        raise SettingsBack
+    return cleaned
+
+
 def _edit_bool(label: str, current: bool) -> bool:
     default = "on" if current else "off"
-    raw = input(f"{label} [on/off, current={default}]: ").strip().lower()
+    raw = _prompt(
+        f"{label} [on/off, current={default}] (:back to menu): ",
+        allow_back=True,
+    ).lower()
     if not raw:
         return current
     if raw in {"on", "yes", "y", "true", "1"}:
@@ -27,15 +60,19 @@ def _edit_list(label: str, current: list[str], examples: str | None = None) -> l
     print("Current:", ", ".join(current) if current else "(empty)")
     if examples:
         print(f"Examples: {examples}")
-    print("Enter executable names separated by commas, or press Enter to keep current.")
-    raw = input("> ").strip()
+    print("Enter executable names separated by commas.")
+    print("Press Enter to keep current, :back for menu, or :q to exit settings.")
+    raw = _prompt("> ", allow_back=True)
     if not raw:
         return current
     return sorted({item.strip() for item in raw.split(",") if item.strip()}, key=str.lower)
 
 
 def _edit_number(label: str, current, cast):
-    raw = input(f"{label} [{current}]: ").strip()
+    raw = _prompt(
+        f"{label} [{current}] (:back to menu): ",
+        allow_back=True,
+    )
     if not raw:
         return current
     try:
@@ -81,10 +118,14 @@ def _summary(config: AppConfig) -> None:
 def run_settings(path: str = "config.json") -> None:
     config = AppConfig.load(path)
 
-    while True:
-        _summary(config)
-        print(
-            """
+    print("Settings controls: q/quit/exit/0 = exit without saving, 9 = save and exit.")
+    print("At nested prompts, :back returns to this menu and :q exits without saving.")
+
+    try:
+        while True:
+            _summary(config)
+            print(
+                """
 1) Advisor / automation mode
 2) Startup Guard
 3) Background Guard
@@ -96,103 +137,124 @@ def run_settings(path: str = "config.json") -> None:
 9) Save and exit
 0) Exit without saving
 """.strip()
-        )
-        choice = input("\nChoose: ").strip()
+            )
+            choice = _prompt("\nChoose: ").strip().lower()
 
-        if choice == "1":
-            config.advisor_mode = _edit_bool("Advisor Mode", config.advisor_mode)
-        elif choice == "2":
-            config.startup_guard_enabled = _edit_bool(
-                "Enable Startup Guard", config.startup_guard_enabled
-            )
-            config.startup_close_allowlist = _edit_list(
-                "Startup apps allowed to close",
-                config.startup_close_allowlist,
-                "btweb.exe, steam.exe, Discord.exe",
-            )
-            config.startup_guard_window_seconds = _edit_number(
-                "Startup guard window (seconds)", config.startup_guard_window_seconds, int
-            )
-            config.startup_guard_grace_seconds = _edit_number(
-                "Startup grace period (seconds)", config.startup_guard_grace_seconds, int
-            )
-        elif choice == "3":
-            config.background_guard_enabled = _edit_bool(
-                "Enable Background Guard", config.background_guard_enabled
-            )
-            config.background_close_allowlist = _edit_list(
-                "Apps allowed to close after long background idle",
-                config.background_close_allowlist,
-                "btweb.exe, steam.exe, Discord.exe",
-            )
-            config.background_close_idle_seconds = _edit_number(
-                "Background idle threshold (seconds)", config.background_close_idle_seconds, int
-            )
-            config.background_close_min_memory_mb = _edit_number(
-                "Minimum RAM before closing (MB)", config.background_close_min_memory_mb, float
-            )
-        elif choice == "4":
-            config.memory_governor_enabled = _edit_bool(
-                "Enable Memory Governor", config.memory_governor_enabled
-            )
-            config.memory_priority_allowlist = _edit_list(
-                "Apps Windows may deprioritize under memory pressure",
-                config.memory_priority_allowlist,
-                "msedge.exe, Discord.exe, steamwebhelper.exe",
-            )
-            config.memory_high_percent = _edit_number(
-                "High-memory threshold (%)", config.memory_high_percent, float
-            )
-            config.memory_critical_percent = _edit_number(
-                "Critical-memory threshold (%)", config.memory_critical_percent, float
-            )
-            config.memory_recovery_percent = _edit_number(
-                "Recovery threshold (%)", config.memory_recovery_percent, float
-            )
-        elif choice == "5":
-            config.pressure_predictor_enabled = _edit_bool(
-                "Enable Pressure Predictor", config.pressure_predictor_enabled
-            )
-            config.pressure_predictive_actions_enabled = _edit_bool(
-                "Allow predictive preemptive memory actions",
-                config.pressure_predictive_actions_enabled,
-            )
-            config.pressure_prediction_horizon_seconds = _edit_number(
-                "Prediction horizon (seconds)", config.pressure_prediction_horizon_seconds, int
-            )
-            config.pressure_prediction_warn_percent = _edit_number(
-                "Predicted-memory warning threshold (%)",
-                config.pressure_prediction_warn_percent,
-                float,
-            )
-        elif choice == "6":
-            config.working_set_trim_enabled = _edit_bool(
-                "Enable emergency working-set trim", config.working_set_trim_enabled
-            )
-            config.working_set_trim_allowlist = _edit_list(
-                "Apps allowed to receive emergency working-set trims",
-                config.working_set_trim_allowlist,
-            )
-            print("Note: leave this OFF unless you have tested the app under pressure.")
-        elif choice == "7":
-            config.process_close_children = _edit_bool(
-                "Close approved app child/helper processes", config.process_close_children
-            )
-            config.process_force_kill_enabled = _edit_bool(
-                "Allow force-kill if graceful close times out",
-                config.process_force_kill_enabled,
-            )
-            config.process_close_timeout_seconds = _edit_number(
-                "Graceful close timeout (seconds)", config.process_close_timeout_seconds, int
-            )
-        elif choice == "8":
-            _show_detected_apps()
-        elif choice == "9":
-            config.save(path)
-            print(f"Saved settings to {path}")
-            return
-        elif choice == "0":
-            print("No changes saved.")
-            return
-        else:
-            print("Unknown choice.")
+            if choice == "1":
+                config.advisor_mode = _edit_bool("Advisor Mode", config.advisor_mode)
+            elif choice == "2":
+                try:
+                    config.startup_guard_enabled = _edit_bool(
+                        "Enable Startup Guard", config.startup_guard_enabled
+                    )
+                    config.startup_close_allowlist = _edit_list(
+                        "Startup apps allowed to close",
+                        config.startup_close_allowlist,
+                        "btweb.exe, steam.exe, Discord.exe",
+                    )
+                    config.startup_guard_window_seconds = _edit_number(
+                        "Startup guard window (seconds)", config.startup_guard_window_seconds, int
+                    )
+                    config.startup_guard_grace_seconds = _edit_number(
+                        "Startup grace period (seconds)", config.startup_guard_grace_seconds, int
+                    )
+                except SettingsBack:
+                    continue
+            elif choice == "3":
+                try:
+                    config.background_guard_enabled = _edit_bool(
+                        "Enable Background Guard", config.background_guard_enabled
+                    )
+                    config.background_close_allowlist = _edit_list(
+                        "Apps allowed to close after long background idle",
+                        config.background_close_allowlist,
+                        "btweb.exe, steam.exe, Discord.exe",
+                    )
+                    config.background_close_idle_seconds = _edit_number(
+                        "Background idle threshold (seconds)", config.background_close_idle_seconds, int
+                    )
+                    config.background_close_min_memory_mb = _edit_number(
+                        "Minimum RAM before closing (MB)", config.background_close_min_memory_mb, float
+                    )
+                except SettingsBack:
+                    continue
+            elif choice == "4":
+                try:
+                    config.memory_governor_enabled = _edit_bool(
+                        "Enable Memory Governor", config.memory_governor_enabled
+                    )
+                    config.memory_priority_allowlist = _edit_list(
+                        "Apps Windows may deprioritize under memory pressure",
+                        config.memory_priority_allowlist,
+                        "msedge.exe, Discord.exe, steamwebhelper.exe",
+                    )
+                    config.memory_high_percent = _edit_number(
+                        "High-memory threshold (%)", config.memory_high_percent, float
+                    )
+                    config.memory_critical_percent = _edit_number(
+                        "Critical-memory threshold (%)", config.memory_critical_percent, float
+                    )
+                    config.memory_recovery_percent = _edit_number(
+                        "Recovery threshold (%)", config.memory_recovery_percent, float
+                    )
+                except SettingsBack:
+                    continue
+            elif choice == "5":
+                try:
+                    config.pressure_predictor_enabled = _edit_bool(
+                        "Enable Pressure Predictor", config.pressure_predictor_enabled
+                    )
+                    config.pressure_predictive_actions_enabled = _edit_bool(
+                        "Allow predictive preemptive memory actions",
+                        config.pressure_predictive_actions_enabled,
+                    )
+                    config.pressure_prediction_horizon_seconds = _edit_number(
+                        "Prediction horizon (seconds)", config.pressure_prediction_horizon_seconds, int
+                    )
+                    config.pressure_prediction_warn_percent = _edit_number(
+                        "Predicted-memory warning threshold (%)",
+                        config.pressure_prediction_warn_percent,
+                        float,
+                    )
+                except SettingsBack:
+                    continue
+            elif choice == "6":
+                try:
+                    config.working_set_trim_enabled = _edit_bool(
+                        "Enable emergency working-set trim", config.working_set_trim_enabled
+                    )
+                    config.working_set_trim_allowlist = _edit_list(
+                        "Apps allowed to receive emergency working-set trims",
+                        config.working_set_trim_allowlist,
+                    )
+                    print("Note: leave this OFF unless you have tested the app under pressure.")
+                except SettingsBack:
+                    continue
+            elif choice == "7":
+                try:
+                    config.process_close_children = _edit_bool(
+                        "Close approved app child/helper processes", config.process_close_children
+                    )
+                    config.process_force_kill_enabled = _edit_bool(
+                        "Allow force-kill if graceful close times out",
+                        config.process_force_kill_enabled,
+                    )
+                    config.process_close_timeout_seconds = _edit_number(
+                        "Graceful close timeout (seconds)", config.process_close_timeout_seconds, int
+                    )
+                except SettingsBack:
+                    continue
+            elif choice == "8":
+                _show_detected_apps()
+            elif choice in {"9", "s", "save"}:
+                config.save(path)
+                print(f"Saved settings to {path}")
+                return
+            elif choice in {"0", "q", "quit", "exit"}:
+                print("No changes saved.")
+                return
+            else:
+                print("Unknown choice. Use 0/q to exit or 9 to save and exit.")
+    except SettingsExit:
+        print("\nSettings closed without saving.")
+        return
