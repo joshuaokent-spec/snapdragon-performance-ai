@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import psutil
 
-from .activity_tracker import ActivityTracker, ProcessActivity
 from .config import AppConfig
 from .models import ActionResult, TelemetrySnapshot
 
@@ -40,7 +39,6 @@ class GuardCandidate:
     proc: psutil.Process
     reason: str
     rss_mb: float
-    activity: ProcessActivity | None = None
 
 
 def _foreground_pid() -> int | None:
@@ -78,7 +76,6 @@ class ProcessGuard:
 
     def __init__(self, config: AppConfig):
         self.config = config
-        self._activity = ActivityTracker()
         self._first_seen: dict[int, float] = {}
         self._last_foreground: dict[int, float] = {}
         self._already_handled_startup: set[int] = set()
@@ -152,11 +149,7 @@ class ProcessGuard:
                 continue
         return candidates
 
-    def _background_candidates(
-        self,
-        now: float,
-        activities: dict[int, ProcessActivity] | None = None,
-    ) -> list[GuardCandidate]:
+    def _background_candidates(self, now: float) -> list[GuardCandidate]:
         if not self.config.background_guard_enabled:
             return []
 
@@ -182,63 +175,11 @@ class ProcessGuard:
                 if idle_seconds < idle_required:
                     continue
 
-                activity: ProcessActivity | None = None
-                if activities is not None:
-                    activity = activities.get(proc.pid)
-
-                    # Missing activity data is treated conservatively in the
-                    # real monitor path: do not close a process we could not
-                    # classify safely.
-                    if activity is None:
-                        continue
-
-                    if self.config.background_activity_protection_enabled:
-                        protection = activity.protection_reason(
-                            cpu_threshold=max(
-                                0.0,
-                                self.config.background_activity_cpu_percent,
-                            ),
-                            io_threshold_kbps=max(
-                                0.0,
-                                self.config.background_activity_io_kbps,
-                            ),
-                            recent_foreground_seconds=max(
-                                0,
-                                self.config.background_recent_foreground_seconds,
-                            ),
-                            min_observation_seconds=max(
-                                0,
-                                self.config.background_activity_min_observation_seconds,
-                            ),
-                        )
-                        if protection is not None:
-                            continue
-
-                    tracked_idle = (
-                        activity.observation_seconds
-                        if activity.seconds_since_foreground is None
-                        else activity.seconds_since_foreground
-                    )
-                    if tracked_idle < idle_required:
-                        continue
-
-                    rss_mb = activity.rss_mb
-                    if rss_mb < self.config.background_close_min_memory_mb:
-                        continue
-
-                reason = f"background for {idle_seconds / 60:.0f} min"
-                if activity is not None:
-                    reason += (
-                        f"; CPU {activity.cpu_percent:.2f}%, "
-                        f"disk I/O {activity.io_kbps:.0f} KB/s"
-                    )
-
                 candidates.append(
                     GuardCandidate(
                         proc=proc,
-                        reason=reason,
+                        reason=f"background for {idle_seconds / 60:.0f} min",
                         rss_mb=rss_mb,
-                        activity=activity,
                     )
                 )
             except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
@@ -347,17 +288,10 @@ class ProcessGuard:
         foreground_pid = _foreground_pid()
         self._update_presence(now, foreground_pid)
 
-        background_names = {
-            name.lower()
-            for name in self.config.background_close_allowlist
-            if name
-        }
-        activities = self._activity.sample(background_names)
-
         by_pid: dict[int, GuardCandidate] = {}
         for candidate in self._startup_candidates(now):
             by_pid[candidate.proc.pid] = candidate
-        for candidate in self._background_candidates(now, activities):
+        for candidate in self._background_candidates(now):
             by_pid.setdefault(candidate.proc.pid, candidate)
 
         results: list[ActionResult] = []

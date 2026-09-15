@@ -57,16 +57,6 @@ class AppConfig:
     background_close_idle_seconds: int = 1800
     background_close_min_memory_mb: float = 100.0
 
-
-    # Activity-aware protection for Background Guard. A hidden app that was
-    # recently foregrounded, is using meaningful CPU/disk I/O, or has not been
-    # observed long enough is protected from automatic closure.
-    background_activity_protection_enabled: bool = True
-    background_recent_foreground_seconds: int = 900
-    background_activity_cpu_percent: float = 1.0
-    background_activity_io_kbps: float = 256.0
-    background_activity_min_observation_seconds: int = 60
-
     process_close_timeout_seconds: int = 6
     process_close_children: bool = True
     process_force_kill_enabled: bool = False
