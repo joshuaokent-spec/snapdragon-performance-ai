@@ -4,7 +4,7 @@ A Windows 11 / Snapdragon Copilot+ PC performance advisor that combines:
 
 - live system telemetry (`psutil` + Windows APIs),
 - local AI inference through **Microsoft Foundry Local**,
-- Windows ML / Qualcomm NPU acceleration when a compatible model variant is available,
+- Qualcomm QNN / Snapdragon NPU acceleration when an NPU model variant is available,
 - deterministic safety policies,
 - SQLite telemetry history,
 - optional, allowlisted and reversible optimization actions.
@@ -13,9 +13,9 @@ A Windows 11 / Snapdragon Copilot+ PC performance advisor that combines:
 >
 > The program defaults to **Advisor Mode**. The AI can recommend a profile, but it cannot invent or execute arbitrary shell commands.
 
-## Why this exists
+## Architecture
 
-The Snapdragon X Elite includes a dedicated Hexagon NPU, but normal Python programs do not automatically make use of it. This project uses a small Foundry Local model as a local decision layer while ordinary Python code collects telemetry and enforces safety rules.
+The app deliberately uses Foundry Local's localhost HTTP service instead of loading Foundry's native Python CFFI runtime into the monitoring process. This keeps the system monitor isolated from hardware-runtime crashes while inference remains entirely on the local PC.
 
 ```text
 Windows telemetry
@@ -23,9 +23,12 @@ Windows telemetry
       v
 Rule classifier ----+
       |              |
-      |         Foundry Local model
+      |       Foundry Local server
+      |       127.0.0.1:<port>
       |              |
-      +-------> recommendation
+      |       QNN / Hexagon NPU
+      |              |
+      +-------> AI recommendation
                        |
                        v
                   Policy engine
@@ -37,20 +40,22 @@ Rule classifier ----+
                    SQLite log
 ```
 
+The application asks the Foundry CLI to load the configured model alias, discovers the local server URL, and sends an OpenAI-compatible `/v1/chat/completions` request over localhost. No cloud inference is required.
+
 The language model is **not** allowed to execute commands. It may only choose from known workload categories and optimization profiles.
 
 ## v0.1 capabilities
 
 - CPU utilization
 - memory utilization
-- disk utilization
+- disk capacity utilization
 - battery percentage / charging state
 - foreground application
 - top CPU-consuming processes
 - active Windows power scheme
 - best-effort NPU utilization discovery through Windows performance counters
 - deterministic workload classification fallback
-- Foundry Local workload classification
+- Foundry Local workload classification through localhost
 - policy validation and battery safety override
 - SQLite history
 - optional Windows power-scheme switching
@@ -80,11 +85,16 @@ Even when Advisor Mode is disabled:
 - Windows 11
 - Python 3.11+
 - Snapdragon X Elite / Copilot+ PC recommended
-- Microsoft Foundry Local
-- `foundry-local-sdk-winml`
+- Microsoft Foundry Local CLI installed and available as `foundry`
 - `psutil`
 
-The application still runs without Foundry Local by falling back to its deterministic classifier.
+The Python application does **not** require the native `foundry-local-sdk` package. Foundry owns the model runtime in its separate local server process.
+
+The application can still run without Foundry Local by using:
+
+```powershell
+python main.py once --no-ai
+```
 
 ## Install
 
@@ -101,26 +111,32 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-If you already have an activated virtual environment, just run:
-
-```powershell
-pip install -r requirements.txt
-```
-
 ## First run
 
 Keep Advisor Mode enabled.
 
+Run the tests:
+
 ```powershell
-python main.py once
+pytest
 ```
 
-That collects one snapshot and prints the recommendation.
+Inspect the local hardware / Foundry setup:
 
-To skip the AI model and test only the deterministic system:
+```powershell
+python main.py diagnose
+```
+
+Test the telemetry-only path:
 
 ```powershell
 python main.py once --no-ai
+```
+
+Then test local AI inference:
+
+```powershell
+python main.py once
 ```
 
 To monitor continuously:
@@ -133,9 +149,7 @@ Stop it with `Ctrl+C`.
 
 ## Configuration
 
-Copy the included settings or edit `config.json` directly.
-
-Important settings:
+Important settings in `config.json`:
 
 ```json
 {
@@ -175,20 +189,14 @@ Windows performance counter naming varies by device/driver version. The app perf
 If none is available, it reports:
 
 ```text
-NPU: unavailable
+NPU: counter unavailable
 ```
 
-This does **not** mean the NPU is broken. Task Manager remains the most reliable visual check while we refine device-specific NPU telemetry support.
+This does **not** mean the NPU is broken. Foundry's model catalog and Task Manager provide independent confirmation of NPU support and activity.
 
 ## Power schemes
 
-The app reads schemes that already exist using:
-
-```powershell
-powercfg /list
-```
-
-It never creates or deletes one.
+The app reads schemes that already exist using `powercfg /list`. It never creates or deletes one.
 
 Profiles request a *kind* of scheme:
 
@@ -196,7 +204,7 @@ Profiles request a *kind* of scheme:
 - Balanced / Development -> Balanced if installed
 - Data Science / Local AI / Performance -> High performance or Ultimate Performance if installed
 
-If your Lenovo only exposes Balanced, the action becomes a no-op rather than forcing an unsupported configuration.
+If the Lenovo only exposes Balanced, the action becomes a no-op rather than forcing an unsupported configuration.
 
 ## Database
 
@@ -214,7 +222,7 @@ Tables:
 - `recommendations`
 - `actions`
 
-That dataset can later be used to train your own workload-classification model.
+That dataset can later be used to train a custom workload-classification model.
 
 ## Project layout
 
@@ -237,13 +245,14 @@ snapdragon-performance-ai/
 │   └── telemetry.py
 └── tests/
     ├── test_classifier.py
+    ├── test_npu.py
     └── test_policy.py
 ```
 
 ## Roadmap
 
 ### v0.2
-- Lenovo/Snapdragon-specific NPU counter mapping
+- Lenovo/Snapdragon-specific NPU telemetry mapping
 - tray UI
 - Windows notifications
 - profile-learning from user approvals/rejections
@@ -252,8 +261,8 @@ snapdragon-performance-ai/
 
 ### v0.3
 - train a lightweight workload classifier from collected telemetry
-- export neural classifier to ONNX
-- run classifier through Windows ML / Qualcomm QNN
+- export the classifier to ONNX
+- run it through Windows ML / Qualcomm QNN
 - reserve the LLM for explanations and unusual cases
 
 ### v0.4
