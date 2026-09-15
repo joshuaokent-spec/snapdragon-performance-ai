@@ -3,7 +3,6 @@ from __future__ import annotations
 import ctypes
 import re
 import subprocess
-from typing import Iterable
 
 import psutil
 
@@ -51,20 +50,34 @@ def _active_power_scheme() -> str | None:
 
 
 def _top_processes(limit: int) -> list[ProcessSample]:
+    """Return Task-Manager-like per-process CPU usage.
+
+    psutil intentionally allows Process.cpu_percent() to exceed 100% when a
+    process uses multiple logical CPUs. For a human-facing Windows dashboard,
+    normalize by logical CPU count so values more closely match Task Manager.
+    """
+    logical_cpus = max(1, psutil.cpu_count(logical=True) or 1)
+    ignored_names = {"system idle process", "idle"}
+
     processes: list[psutil.Process] = []
     for proc in psutil.process_iter(["pid", "name"]):
         try:
+            name = (proc.info.get("name") or "").strip().lower()
+            if proc.pid == 0 or name in ignored_names:
+                continue
             proc.cpu_percent(None)
             processes.append(proc)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
+    # Give the primed counters a short measurement window.
     psutil.cpu_percent(interval=0.25)
 
     samples: list[ProcessSample] = []
     for proc in processes:
         try:
-            cpu = float(proc.cpu_percent(None))
+            raw_cpu = float(proc.cpu_percent(None))
+            cpu = min(100.0, raw_cpu / logical_cpus)
             mem = float(proc.memory_percent())
             if cpu <= 0 and mem <= 0:
                 continue
