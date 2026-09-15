@@ -11,7 +11,6 @@ from .config import AppConfig
 from .models import ActionResult, TelemetrySnapshot
 
 
-# Windows access rights / API constants.
 PROCESS_SET_INFORMATION = 0x0200
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_QUERY_INFORMATION = 0x0400
@@ -24,8 +23,6 @@ MEMORY_PRIORITY_MEDIUM = 3
 MEMORY_PRIORITY_BELOW_NORMAL = 4
 MEMORY_PRIORITY_NORMAL = 5
 
-# Processes that should never be manipulated by this project even if a user
-# accidentally puts one in an allowlist.
 PROTECTED_PROCESS_NAMES = {
     "system",
     "registry",
@@ -188,7 +185,7 @@ def _foreground_pid() -> int | None:
 class MemoryGovernor:
     """Adaptive, allowlisted memory-pressure controller.
 
-    The governor does not attempt to 'allocate RAM' to applications. Instead it
+    The governor does not attempt to allocate RAM to applications. Instead it
     gives Windows memory-priority hints, optionally lowers CPU priority for
     background apps, and can perform an emergency working-set trim only for an
     explicit trim allowlist.
@@ -198,6 +195,32 @@ class MemoryGovernor:
         self.config = config
         self._managed: dict[int, ManagedProcessState] = {}
         self._last_trim: dict[int, float] = {}
+
+    def _largest_memory_consumers(self, limit: int = 5) -> list[tuple[str, float, int]]:
+        """Aggregate resident memory by executable name for human diagnostics."""
+        current_pid = os.getpid()
+        totals: dict[str, list[float | int]] = {}
+        for proc in psutil.process_iter(["pid", "name", "memory_info"]):
+            try:
+                pid = int(proc.info["pid"])
+                name = (proc.info.get("name") or "unknown").strip()
+                lower = name.lower()
+                if pid in {0, current_pid} or lower in PROTECTED_PROCESS_NAMES:
+                    continue
+                mem = proc.info.get("memory_info")
+                rss_mb = float(mem.rss) / (1024 * 1024) if mem else 0.0
+                bucket = totals.setdefault(name, [0.0, 0])
+                bucket[0] = float(bucket[0]) + rss_mb
+                bucket[1] = int(bucket[1]) + 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                continue
+
+        ranked = [
+            (name, float(values[0]), int(values[1]))
+            for name, values in totals.items()
+        ]
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        return ranked[:limit]
 
     def _candidate_processes(self) -> list[tuple[psutil.Process, float]]:
         allow = {
@@ -311,14 +334,15 @@ class MemoryGovernor:
         if memory < self.config.memory_high_percent:
             return []
 
-        level = (
-            "critical"
-            if memory >= self.config.memory_critical_percent
-            else "high"
-        )
+        level = "critical" if memory >= self.config.memory_critical_percent else "high"
         target_priority = (
             MEMORY_PRIORITY_LOW if level == "critical" else MEMORY_PRIORITY_BELOW_NORMAL
         )
+        biggest = self._largest_memory_consumers(4)
+        biggest_text = ", ".join(
+            f"{name} {rss_mb:.0f} MB/{count} proc"
+            for name, rss_mb, count in biggest
+        ) or "no user-process data"
 
         if self.config.advisor_mode:
             if not candidates:
@@ -328,8 +352,9 @@ class MemoryGovernor:
                         requested=level,
                         applied=False,
                         detail=(
-                            f"Memory pressure is {memory:.1f}% ({level}), but no approved "
-                            "background processes are in memory_priority_allowlist."
+                            f"Memory pressure is {memory:.1f}% ({level}). Largest consumers: "
+                            f"{biggest_text}. No approved background targets are currently in "
+                            "memory_priority_allowlist."
                         ),
                     )
                 ]
@@ -344,8 +369,9 @@ class MemoryGovernor:
                     requested=level,
                     applied=False,
                     detail=(
-                        f"Memory pressure is {memory:.1f}% ({level}). Would reprioritize: "
-                        f"{preview}. Advisor Mode prevents changes."
+                        f"Memory pressure is {memory:.1f}% ({level}). Largest consumers: "
+                        f"{biggest_text}. Would reprioritize approved targets: {preview}. "
+                        "Advisor Mode prevents changes."
                     ),
                 )
             ]
@@ -422,4 +448,16 @@ class MemoryGovernor:
                     )
                 )
 
+        if not results:
+            results.append(
+                ActionResult(
+                    action="memory_governor",
+                    requested=level,
+                    applied=False,
+                    detail=(
+                        f"Memory pressure is {memory:.1f}% ({level}), but no approved "
+                        "background process was eligible for reprioritization."
+                    ),
+                )
+            )
         return results
