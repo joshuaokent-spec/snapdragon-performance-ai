@@ -272,13 +272,15 @@ class MemoryGovernor:
             original_memory_priority=_get_memory_priority(proc.pid),
         )
 
-    def _restore_managed(self) -> list[ActionResult]:
+    def _restore_pids(self, pids: set[int]) -> list[ActionResult]:
         results: list[ActionResult] = []
-        for pid, state in list(self._managed.items()):
+        for pid in list(pids):
+            state = self._managed.get(pid)
+            if state is None:
+                continue
             try:
                 proc = psutil.Process(pid)
                 if proc.name().lower() != state.name.lower():
-                    self._managed.pop(pid, None)
                     continue
 
                 if state.original_memory_priority is not None:
@@ -319,20 +321,33 @@ class MemoryGovernor:
                 self._last_trim.pop(pid, None)
         return results
 
+    def _restore_managed(self) -> list[ActionResult]:
+        return self._restore_pids(set(self._managed))
+
     def evaluate(self, snap: TelemetrySnapshot) -> list[ActionResult]:
         if not self.config.memory_governor_enabled:
             return []
 
         memory = float(snap.memory_percent)
+        results: list[ActionResult] = []
+
+        # A process that becomes foreground gets its original priorities back
+        # immediately, even while the rest of the system remains under pressure.
+        if not self.config.advisor_mode:
+            fg_pid = _foreground_pid()
+            if fg_pid is not None and fg_pid in self._managed:
+                results.extend(self._restore_pids({fg_pid}))
+
         candidates = self._candidate_processes()
 
         if memory <= self.config.memory_recovery_percent:
             if self.config.advisor_mode:
                 return []
-            return self._restore_managed()
+            results.extend(self._restore_managed())
+            return results
 
         if memory < self.config.memory_high_percent:
-            return []
+            return results
 
         level = "critical" if memory >= self.config.memory_critical_percent else "high"
         target_priority = (
@@ -376,7 +391,6 @@ class MemoryGovernor:
                 )
             ]
 
-        results: list[ActionResult] = []
         trim_allow = {name.lower() for name in self.config.working_set_trim_allowlist}
         now = time.monotonic()
 
