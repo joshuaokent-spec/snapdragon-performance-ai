@@ -1,7 +1,7 @@
 [project]
 name = "snapdragon-performance-ai"
-version = "0.1.0"
-description = "Local AI performance advisor for Windows Snapdragon Copilot+ PCs"
+version = "0.2.0"
+description = "Predictive local AI performance governor for Windows Snapdragon Copilot+ PCs"
 requires-python = ">=3.11"
 dependencies = [
     "psutil>=5.9",
