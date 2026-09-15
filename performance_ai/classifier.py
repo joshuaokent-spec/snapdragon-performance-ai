@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .models import Recommendation, TelemetrySnapshot
+from .models import PressurePrediction, Recommendation, TelemetrySnapshot
 
 
 DEV_PROCESSES = {
@@ -159,8 +159,6 @@ def _walk_for_local_url(value: Any) -> str | None:
 
 
 def _foundry_base_url() -> str:
-    # Prefer machine-readable output, but fall back to the human status text so
-    # this survives minor CLI schema changes.
     try:
         result = _run_foundry(["server", "status", "--output", "json"], timeout=20)
         raw = (result.stdout or "").strip()
@@ -215,12 +213,7 @@ def _resolve_loaded_model_id(base_url: str, alias: str) -> str:
 
 
 class FoundryClassifier:
-    """Classify workloads through the local Foundry HTTP server.
-
-    Using the server avoids loading Foundry's native CFFI binding into this
-    Python process. Inference remains fully local; the Foundry daemon owns the
-    hardware-specific WinML/QNN runtime and our process talks to localhost.
-    """
+    """Classify workloads through the local Foundry HTTP server."""
 
     def __init__(self, model_alias: str = "qwen2.5-0.5b"):
         self.model_alias = model_alias
@@ -230,22 +223,18 @@ class FoundryClassifier:
     def start(self) -> None:
         if self.base_url and self.model_id:
             return
-
-        # Alias selection is handled by Foundry; on a Snapdragon Copilot+ PC it
-        # can choose the cached QNN/NPU variant shown by `foundry model list`.
         _run_foundry(["model", "load", self.model_alias], timeout=180)
         self.base_url = _foundry_base_url()
         self.model_id = _resolve_loaded_model_id(self.base_url, self.model_alias)
 
     def close(self) -> None:
-        # Leave the Foundry server/model running so repeated monitor cycles do
-        # not pay load/unload overhead. The user can stop it with the CLI.
         return
 
     def classify(
         self,
         snap: TelemetrySnapshot,
         fallback: Recommendation,
+        prediction: PressurePrediction | None = None,
     ) -> Recommendation:
         self.start()
         assert self.base_url is not None
@@ -272,6 +261,7 @@ Important rules:
 - DATA_SCIENCE is appropriate for sustained Python/data/ETL workloads.
 - DEVELOPMENT is appropriate for coding/building with developer tools.
 - PERFORMANCE should be reserved for heavy sustained compute, especially while plugged in.
+- A pressure forecast is contextual evidence, not permission to close or modify a process.
 - Return exactly one compact JSON object and no markdown or commentary.
 
 Schema:
@@ -283,7 +273,7 @@ Schema:
 }
 """.strip()
 
-        user = {
+        user: dict[str, Any] = {
             "telemetry": snap.to_dict(),
             "rule_baseline": {
                 "workload": fallback.workload,
@@ -292,6 +282,8 @@ Schema:
                 "reason": fallback.reason,
             },
         }
+        if prediction is not None:
+            user["pressure_prediction"] = prediction.to_dict()
 
         response = _http_json(
             f"{self.base_url}/v1/chat/completions",
