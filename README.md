@@ -91,8 +91,8 @@ The application still runs without Foundry Local by falling back to its determin
 From PowerShell:
 
 ```powershell
-cd C:\AI\FoundryLocal
-git clone <your-github-repo-url> snapdragon-performance-ai
+cd C:\AI
+git clone https://github.com/joshuaokent-spec/snapdragon-performance-ai.git
 cd snapdragon-performance-ai
 
 python -m venv .venv
