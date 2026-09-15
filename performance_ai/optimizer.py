@@ -6,7 +6,8 @@ import subprocess
 import psutil
 
 from .config import AppConfig
-from .models import ActionResult, Recommendation
+from .memory_governor import MemoryGovernor
+from .models import ActionResult, Recommendation, TelemetrySnapshot
 from .profiles import PROFILE_POWER_SCHEME_PREFERENCE
 
 
@@ -34,9 +35,7 @@ def installed_power_schemes() -> dict[str, str]:
         return {}
 
     schemes: dict[str, str] = {}
-    pattern = re.compile(
-        r"([0-9a-fA-F-]{36})\s+\(([^)]+)\)"
-    )
+    pattern = re.compile(r"([0-9a-fA-F-]{36})\s+\(([^)]+)\)")
     for guid, name in pattern.findall(result.stdout):
         schemes[name.strip().lower()] = guid
     return schemes
@@ -45,6 +44,7 @@ def installed_power_schemes() -> dict[str, str]:
 class Optimizer:
     def __init__(self, config: AppConfig):
         self.config = config
+        self.memory_governor = MemoryGovernor(config)
 
     def _choose_scheme(self, profile: str) -> tuple[str, str] | None:
         schemes = installed_power_schemes()
@@ -129,7 +129,15 @@ class Optimizer:
                 )
         return results
 
-    def apply(self, rec: Recommendation) -> list[ActionResult]:
+    def apply(
+        self,
+        rec: Recommendation,
+        snap: TelemetrySnapshot,
+    ) -> list[ActionResult]:
+        # The memory governor is evaluated on every telemetry cycle so it can
+        # react independently of the slower AI interval.
+        memory_results = self.memory_governor.evaluate(snap)
+
         if self.config.advisor_mode:
             return [
                 ActionResult(
@@ -137,7 +145,8 @@ class Optimizer:
                     requested=rec.profile,
                     applied=False,
                     detail="Advisor Mode is enabled; no system setting was changed.",
-                )
+                ),
+                *memory_results,
             ]
 
         results = [self._apply_power_scheme(rec.profile)]
@@ -145,4 +154,5 @@ class Optimizer:
         if rec.profile in {"LOCAL_AI", "DATA_SCIENCE", "PERFORMANCE"}:
             results.extend(self._lower_allowlisted_background_processes())
 
+        results.extend(memory_results)
         return results
