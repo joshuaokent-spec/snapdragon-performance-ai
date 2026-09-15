@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 
 from .classifier import FoundryClassifier, RuleClassifier
 from .config import AppConfig
 from .models import Recommendation, TelemetrySnapshot
+from .npu import foundry_npu_diagnostics
 from .optimizer import Optimizer
 from .policy import PolicyEngine
 from .storage import Storage
@@ -13,7 +15,11 @@ from .telemetry import TelemetryCollector
 
 
 def _print_snapshot(snap: TelemetrySnapshot) -> None:
-    npu = "unavailable" if snap.npu_percent is None else f"{snap.npu_percent:.1f}%"
+    npu = (
+        "counter unavailable"
+        if snap.npu_percent is None
+        else f"{snap.npu_percent:.1f}%"
+    )
     battery = (
         "unavailable"
         if snap.battery_percent is None
@@ -29,6 +35,9 @@ def _print_snapshot(snap: TelemetrySnapshot) -> None:
     print(f"Battery:    {battery}")
     print(f"Foreground: {snap.foreground_process or 'unknown'}")
     print(f"Power:      {snap.power_scheme or 'unknown'}")
+
+    if snap.npu_percent is None:
+        print("            (Task Manager may still expose NPU usage normally.)")
 
     if snap.top_processes:
         print("\nTop processes:")
@@ -47,6 +56,26 @@ def _print_recommendation(rec: Recommendation) -> None:
     print(f"Confidence: {rec.confidence:.0%}")
     print(f"Source:     {rec.source}")
     print(f"Reason:     {rec.reason}")
+
+
+def run_diagnostics() -> None:
+    print("=== Snapdragon Performance AI diagnostics ===")
+    data = foundry_npu_diagnostics()
+
+    counters = data.get("typeperf_npu_counters") or []
+    print(f"\nWindows NPU performance counters: {len(counters)} found")
+    for counter in counters[:8]:
+        print(f"  {counter}")
+    if not counters:
+        print("  None found. This is not proof that the NPU is unavailable.")
+
+    print(f"\nFoundry CLI: {data.get('foundry_cli') or 'not found on PATH'}")
+
+    print("\nFoundry server status:")
+    print(data.get("foundry_server") or "  unavailable")
+
+    print("\nFoundry NPU model variants:")
+    print(data.get("foundry_npu_models") or "  none reported")
 
 
 class PerformanceAI:
@@ -148,7 +177,7 @@ def cli() -> None:
     )
     parser.add_argument(
         "command",
-        choices=["once", "monitor"],
+        choices=["once", "monitor", "diagnose"],
         nargs="?",
         default="once",
     )
@@ -163,6 +192,10 @@ def cli() -> None:
         help="Disable Foundry Local and use deterministic rules only.",
     )
     args = parser.parse_args()
+
+    if args.command == "diagnose":
+        run_diagnostics()
+        return
 
     config = AppConfig.load(args.config)
     use_ai = not args.no_ai
