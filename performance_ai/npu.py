@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import shutil
 import subprocess
 from functools import lru_cache
 
 
 CREATE_NO_WINDOW = 0x08000000
+_NPU_TOKEN_RE = re.compile(r"(?<![A-Za-z])NPU(?:\b|(?=\d))", re.IGNORECASE)
 
 
 def _run(args: list[str], timeout: int = 8) -> subprocess.CompletedProcess[str] | None:
@@ -40,6 +42,22 @@ def _safe_output(result: subprocess.CompletedProcess[str] | None) -> str | None:
     return stdout.strip() or stderr.strip() or f"exit {result.returncode}"
 
 
+def _looks_like_npu_counter(counter: str) -> bool:
+    """Return True only when NPU appears as a hardware token, not inside a word.
+
+    For example, ``TextInputHost`` contains the letters ``npu`` across ``input``;
+    that must not be mistaken for a Neural Processing Unit counter.
+    """
+    if not _NPU_TOKEN_RE.search(counter):
+        return False
+
+    lower = counter.lower()
+    return any(
+        marker in lower
+        for marker in ("utilization", "% processor", "usage", "engine")
+    )
+
+
 @lru_cache(maxsize=1)
 def discover_npu_counters() -> tuple[str, ...]:
     """Best-effort discovery of Windows NPU utilization performance counters.
@@ -55,13 +73,7 @@ def discover_npu_counters() -> tuple[str, ...]:
     candidates: list[str] = []
     for line in (result.stdout or "").splitlines():
         clean = line.strip()
-        lower = clean.lower()
-        if "npu" in lower and (
-            "utilization" in lower
-            or "% processor" in lower
-            or "usage" in lower
-            or "engine" in lower
-        ):
+        if _looks_like_npu_counter(clean):
             candidates.append(clean)
 
     candidates.sort(key=lambda s: (s.count("("), len(s)))
