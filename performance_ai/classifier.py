@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
+import urllib.error
+import urllib.request
 from typing import Any
 
 from .models import Recommendation, TelemetrySnapshot
@@ -18,6 +22,8 @@ DATA_PROCESSES = {
 AI_PROCESSES = {
     "foundry.exe", "onnxruntime.exe", "ollama.exe", "lmstudio.exe",
 }
+
+CREATE_NO_WINDOW = 0x08000000
 
 
 class RuleClassifier:
@@ -112,41 +118,129 @@ def _extract_json(text: str) -> dict[str, Any]:
     return value
 
 
+def _run_foundry(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    foundry = shutil.which("foundry")
+    if not foundry:
+        raise RuntimeError("Foundry Local CLI was not found on PATH.")
+
+    result = subprocess.run(
+        [foundry, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+        creationflags=CREATE_NO_WINDOW,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"Foundry command failed ({' '.join(args)}): {detail or result.returncode}"
+        )
+    return result
+
+
+def _walk_for_local_url(value: Any) -> str | None:
+    if isinstance(value, str):
+        match = re.search(r"https?://(?:127\.0\.0\.1|localhost):\d+", value)
+        return match.group(0) if match else None
+    if isinstance(value, dict):
+        for child in value.values():
+            found = _walk_for_local_url(child)
+            if found:
+                return found
+    if isinstance(value, list):
+        for child in value:
+            found = _walk_for_local_url(child)
+            if found:
+                return found
+    return None
+
+
+def _foundry_base_url() -> str:
+    # Prefer machine-readable output, but fall back to the human status text so
+    # this survives minor CLI schema changes.
+    try:
+        result = _run_foundry(["server", "status", "--output", "json"], timeout=20)
+        raw = (result.stdout or "").strip()
+        if raw:
+            parsed = json.loads(raw)
+            url = _walk_for_local_url(parsed)
+            if url:
+                return url.rstrip("/")
+    except (RuntimeError, json.JSONDecodeError):
+        pass
+
+    result = _run_foundry(["server", "status"], timeout=20)
+    url = _walk_for_local_url(result.stdout or "")
+    if not url:
+        raise RuntimeError("Foundry server is running but its localhost URL was not found.")
+    return url.rstrip("/")
+
+
+def _http_json(url: str, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method=method,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Foundry HTTP {exc.code}: {detail[:500]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not reach Foundry Local server: {exc}") from exc
+
+
+def _resolve_loaded_model_id(base_url: str, alias: str) -> str:
+    try:
+        payload = _http_json(f"{base_url}/v1/models")
+        models = payload.get("data", []) if isinstance(payload, dict) else []
+        ids = [str(item.get("id", "")) for item in models if isinstance(item, dict)]
+        for model_id in ids:
+            if model_id == alias:
+                return model_id
+        alias_norm = alias.lower().replace("_", "-")
+        for model_id in ids:
+            if alias_norm in model_id.lower().replace("_", "-"):
+                return model_id
+    except Exception:
+        pass
+    return alias
+
+
 class FoundryClassifier:
-    """Small Foundry Local model used only as a recommendation/classification layer."""
+    """Classify workloads through the local Foundry HTTP server.
+
+    Using the server avoids loading Foundry's native CFFI binding into this
+    Python process. Inference remains fully local; the Foundry daemon owns the
+    hardware-specific WinML/QNN runtime and our process talks to localhost.
+    """
 
     def __init__(self, model_alias: str = "qwen2.5-0.5b"):
         self.model_alias = model_alias
-        self.manager = None
-        self.model = None
-        self.client = None
+        self.base_url: str | None = None
+        self.model_id: str | None = None
 
     def start(self) -> None:
-        if self.client is not None:
+        if self.base_url and self.model_id:
             return
 
-        from foundry_local_sdk import Configuration, FoundryLocalManager
-
-        FoundryLocalManager.initialize(
-            Configuration(app_name="snapdragon-performance-ai")
-        )
-        self.manager = FoundryLocalManager.instance
-
-        # Foundry Local 2.x automatically selects and loads the appropriate
-        # hardware execution provider (WinML/QNN on compatible Snapdragon PCs).
-        self.model = self.manager.catalog.get_model(self.model_alias)
-        self.model.download()
-        self.model.load()
-        self.client = self.model.get_chat_client()
+        # Alias selection is handled by Foundry; on a Snapdragon Copilot+ PC it
+        # can choose the cached QNN/NPU variant shown by `foundry model list`.
+        _run_foundry(["model", "load", self.model_alias], timeout=180)
+        self.base_url = _foundry_base_url()
+        self.model_id = _resolve_loaded_model_id(self.base_url, self.model_alias)
 
     def close(self) -> None:
-        if self.model is not None:
-            try:
-                self.model.unload()
-            except Exception:
-                pass
-        self.client = None
-        self.model = None
+        # Leave the Foundry server/model running so repeated monitor cycles do
+        # not pay load/unload overhead. The user can stop it with the CLI.
+        return
 
     def classify(
         self,
@@ -154,8 +248,9 @@ class FoundryClassifier:
         fallback: Recommendation,
     ) -> Recommendation:
         self.start()
+        assert self.base_url is not None
+        assert self.model_id is not None
 
-        payload = snap.to_dict()
         system = """
 You are a local Windows performance workload classifier running on a Copilot+ PC.
 
@@ -189,7 +284,7 @@ Schema:
 """.strip()
 
         user = {
-            "telemetry": payload,
+            "telemetry": snap.to_dict(),
             "rule_baseline": {
                 "workload": fallback.workload,
                 "profile": fallback.profile,
@@ -198,20 +293,33 @@ Schema:
             },
         }
 
-        response = self.client.complete_chat(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-            ]
+        response = _http_json(
+            f"{self.base_url}/v1/chat/completions",
+            method="POST",
+            payload={
+                "model": self.model_id,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+                ],
+                "temperature": 0.0,
+                "max_tokens": 160,
+                "stream": False,
+            },
         )
-        content = response.choices[0].message.content
-        parsed = _extract_json(content)
 
+        try:
+            content = response["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            preview = json.dumps(response, ensure_ascii=False)[:500]
+            raise ValueError(f"Unexpected Foundry response: {preview}") from exc
+
+        parsed = _extract_json(str(content))
         rec = Recommendation(
             workload=str(parsed["workload"]),
             profile=str(parsed["profile"]),
             confidence=float(parsed.get("confidence", 0.5)),
             reason=str(parsed.get("reason", "Foundry Local recommendation.")),
-            source="foundry-local",
+            source="foundry-local-http",
         )
         return rec.normalized()
