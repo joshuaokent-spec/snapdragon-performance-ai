@@ -4,7 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from .models import ActionResult, Recommendation, TelemetrySnapshot
+from .models import ActionResult, PressurePrediction, Recommendation, TelemetrySnapshot
 
 
 class Storage:
@@ -38,6 +38,18 @@ class Storage:
                 profile TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 reason TEXT NOT NULL,
+                source TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                horizon_seconds INTEGER NOT NULL,
+                current_memory_percent REAL NOT NULL,
+                predicted_memory_percent REAL NOT NULL,
+                memory_slope_percent_per_minute REAL NOT NULL,
+                risk TEXT NOT NULL,
+                confidence REAL NOT NULL,
                 source TEXT NOT NULL
             );
 
@@ -95,7 +107,33 @@ class Storage:
         )
         self.conn.commit()
 
+    def log_prediction(self, prediction: PressurePrediction | None) -> None:
+        if prediction is None:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO predictions (
+                timestamp, horizon_seconds, current_memory_percent,
+                predicted_memory_percent, memory_slope_percent_per_minute,
+                risk, confidence, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                prediction.timestamp,
+                prediction.horizon_seconds,
+                prediction.current_memory_percent,
+                prediction.predicted_memory_percent,
+                prediction.memory_slope_percent_per_minute,
+                prediction.risk,
+                prediction.confidence,
+                prediction.source,
+            ),
+        )
+        self.conn.commit()
+
     def log_actions(self, results: list[ActionResult]) -> None:
+        if not results:
+            return
         self.conn.executemany(
             """
             INSERT INTO actions (action, requested, applied, detail)
